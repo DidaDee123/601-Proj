@@ -1,7 +1,6 @@
 # =============================================================================
 # EXMD 601 - Team Project
 # Logistic Regression Analysis: Cardiovascular Complications in Diabetic Patients
-# Author: Christoforos
 # =============================================================================
 #
 # Research Question: What factors predict cardiovascular complications in
@@ -11,6 +10,9 @@
 # the Random Forest model (David, Python). Two outcomes are modeled:
 #   Outcome A: Cardiovascular complication within 10 years (stroke/HF/CKD)
 #   Outcome B: ED visit within 1 year
+#
+# Both models use the same 80/20 stratified train/test split so that results
+# are directly comparable with the Random Forest.
 #
 # =============================================================================
 
@@ -29,7 +31,7 @@ if (!require("ggplot2", quietly = TRUE)) {
 # --- 1. Load and inspect data ------------------------------------------------
 
 # Path is relative to the script location (model/ directory)
-data_path <- file.path("..", "..", "data", "cleaned_diabetic_patients_data.csv")
+data_path <- file.path("..", "data", "cleaned_data.csv")
 df <- read.csv(data_path, stringsAsFactors = FALSE)
 
 cat("=== Dataset Dimensions ===\n")
@@ -49,14 +51,14 @@ cat("\n")
 
 # Check outcome distribution (important for class imbalance)
 cat("=== Outcome A Distribution (CV complication 10y) ===\n")
-print(table(df$outcome_a_cv_complication_10y))
+print(table(df$outcome_a))
 cat("Proportion positive:",
-    mean(df$outcome_a_cv_complication_10y, na.rm = TRUE), "\n\n")
+    mean(df$outcome_a, na.rm = TRUE), "\n\n")
 
 cat("=== Outcome B Distribution (ED visit 1y) ===\n")
-print(table(df$outcome_b_ed_visit_1y))
+print(table(df$outcome_b))
 cat("Proportion positive:",
-    mean(df$outcome_b_ed_visit_1y, na.rm = TRUE), "\n\n")
+    mean(df$outcome_b, na.rm = TRUE), "\n\n")
 
 # Check for remaining missing values
 cat("=== Missing Values per Column ===\n")
@@ -65,14 +67,14 @@ cat("\n")
 
 # --- 2. Define predictors ----------------------------------------------------
 
-# All predictor columns (everything except the two outcome columns)
+# All predictor columns — same feature set as the Random Forest model.
+# Excludes has_death_record, hospitalized, has_mi_20y (data leakage).
 predictor_cols <- c(
   "age", "gender",
   "hba1c", "cholesterol", "glucose", "triglycerides", "creatinine",
   "has_hba1c", "has_cholesterol", "has_glucose",
   "has_triglycerides", "has_creatinine",
-  "encounter_type_inpatient",
-  "had_mi_20y"
+  "encounter_inpatient"
 )
 
 # Verify all columns exist in the data
@@ -84,27 +86,52 @@ if (length(missing_cols) > 0) {
 
 # Build formula strings
 formula_a <- as.formula(
-  paste("outcome_a_cv_complication_10y ~", paste(predictor_cols, collapse = " + "))
+  paste("outcome_a ~", paste(predictor_cols, collapse = " + "))
 )
 formula_b <- as.formula(
-  paste("outcome_b_ed_visit_1y ~", paste(predictor_cols, collapse = " + "))
+  paste("outcome_b ~", paste(predictor_cols, collapse = " + "))
 )
 
 cat("=== Model Formula (Outcome A) ===\n")
 print(formula_a)
 cat("\n")
 
+# --- 3. Train / Test Split ---------------------------------------------------
+# 80/20 stratified split to match the Random Forest evaluation and avoid
+# reporting over-optimistic in-sample metrics.
+
+set.seed(42)
+
+# Stratified split on outcome_a
+idx_pos_a <- which(df$outcome_a == 1)
+idx_neg_a <- which(df$outcome_a == 0)
+
+train_pos_a <- sample(idx_pos_a, size = floor(0.8 * length(idx_pos_a)))
+train_neg_a <- sample(idx_neg_a, size = floor(0.8 * length(idx_neg_a)))
+train_idx <- sort(c(train_pos_a, train_neg_a))
+test_idx  <- setdiff(seq_len(nrow(df)), train_idx)
+
+df_train <- df[train_idx, ]
+df_test  <- df[test_idx, ]
+
+cat("=== Train/Test Split ===\n")
+cat("Train:", nrow(df_train), "rows | Test:", nrow(df_test), "rows\n")
+cat("Train outcome_a positive rate:", mean(df_train$outcome_a), "\n")
+cat("Test  outcome_a positive rate:", mean(df_test$outcome_a), "\n")
+cat("Train outcome_b positive rate:", mean(df_train$outcome_b), "\n")
+cat("Test  outcome_b positive rate:", mean(df_test$outcome_b), "\n\n")
+
 # =============================================================================
-# --- 3. Logistic Regression - Outcome A (CV Complication within 10 years) ----
+# --- 4. Logistic Regression - Outcome A (CV Complication within 10 years) ----
 # =============================================================================
 
 cat("###################################################################\n")
 cat("# OUTCOME A: Cardiovascular Complication within 10 Years          #\n")
 cat("###################################################################\n\n")
 
-model_a <- glm(formula_a, data = df, family = binomial(link = "logit"))
+model_a <- glm(formula_a, data = df_train, family = binomial(link = "logit"))
 
-# --- 3a. Model summary -------------------------------------------------------
+# --- 4a. Model summary -------------------------------------------------------
 cat("=== Model Summary ===\n")
 print(summary(model_a))
 cat("\n")
@@ -112,7 +139,7 @@ cat("\n")
 cat("=== AIC ===\n")
 cat("AIC:", AIC(model_a), "\n\n")
 
-# --- 3b. Odds ratios and confidence intervals ---------------------------------
+# --- 4b. Odds ratios and confidence intervals ---------------------------------
 # Odds ratios = exp(coefficients); values > 1 indicate increased odds
 coef_a <- summary(model_a)$coefficients
 or_a   <- exp(coef(model_a))
@@ -143,14 +170,14 @@ if (nrow(sig_a) > 0) {
 }
 cat("\n")
 
-# --- 3c. Model evaluation ----------------------------------------------------
+# --- 4c. Model evaluation (on TEST set) --------------------------------------
 
-# Predicted probabilities
-pred_prob_a <- predict(model_a, type = "response")
+# Predicted probabilities on the test set
+pred_prob_a <- predict(model_a, newdata = df_test, type = "response")
 
 # Confusion matrix at 0.5 threshold
 pred_class_a <- ifelse(pred_prob_a >= 0.5, 1, 0)
-actual_a     <- df$outcome_a_cv_complication_10y
+actual_a     <- df_test$outcome_a
 
 cm_a <- table(Predicted = pred_class_a, Actual = actual_a)
 cat("=== Confusion Matrix (threshold = 0.5) ===\n")
@@ -172,7 +199,7 @@ f1_a          <- ifelse(!is.na(precision_a) & !is.na(sensitivity_a) &
                         2 * precision_a * sensitivity_a /
                           (precision_a + sensitivity_a), NA)
 
-cat("=== Classification Metrics (Outcome A) ===\n")
+cat("=== Classification Metrics (Outcome A — TEST set) ===\n")
 cat("Accuracy:   ", round(accuracy_a, 4), "\n")
 cat("Sensitivity:", round(sensitivity_a, 4), "\n")
 cat("Specificity:", round(specificity_a, 4), "\n")
@@ -186,16 +213,16 @@ cat("=== AUC (Outcome A) ===\n")
 cat("AUC:", as.numeric(auc_a), "\n\n")
 
 # =============================================================================
-# --- 4. Logistic Regression - Outcome B (ED Visit within 1 Year) -------------
+# --- 5. Logistic Regression - Outcome B (ED Visit within 1 Year) -------------
 # =============================================================================
 
 cat("###################################################################\n")
 cat("# OUTCOME B: ED Visit within 1 Year                              #\n")
 cat("###################################################################\n\n")
 
-model_b <- glm(formula_b, data = df, family = binomial(link = "logit"))
+model_b <- glm(formula_b, data = df_train, family = binomial(link = "logit"))
 
-# --- 4a. Model summary -------------------------------------------------------
+# --- 5a. Model summary -------------------------------------------------------
 cat("=== Model Summary ===\n")
 print(summary(model_b))
 cat("\n")
@@ -203,7 +230,7 @@ cat("\n")
 cat("=== AIC ===\n")
 cat("AIC:", AIC(model_b), "\n\n")
 
-# --- 4b. Odds ratios and confidence intervals ---------------------------------
+# --- 5b. Odds ratios and confidence intervals ---------------------------------
 coef_b <- summary(model_b)$coefficients
 or_b   <- exp(coef(model_b))
 ci_b   <- exp(confint.default(model_b))
@@ -232,11 +259,11 @@ if (nrow(sig_b) > 0) {
 }
 cat("\n")
 
-# --- 4c. Model evaluation ----------------------------------------------------
+# --- 5c. Model evaluation (on TEST set) --------------------------------------
 
-pred_prob_b  <- predict(model_b, type = "response")
+pred_prob_b  <- predict(model_b, newdata = df_test, type = "response")
 pred_class_b <- ifelse(pred_prob_b >= 0.5, 1, 0)
-actual_b     <- df$outcome_b_ed_visit_1y
+actual_b     <- df_test$outcome_b
 
 cm_b <- table(Predicted = pred_class_b, Actual = actual_b)
 cat("=== Confusion Matrix (threshold = 0.5) ===\n")
@@ -257,7 +284,7 @@ f1_b          <- ifelse(!is.na(precision_b) & !is.na(sensitivity_b) &
                         2 * precision_b * sensitivity_b /
                           (precision_b + sensitivity_b), NA)
 
-cat("=== Classification Metrics (Outcome B) ===\n")
+cat("=== Classification Metrics (Outcome B — TEST set) ===\n")
 cat("Accuracy:   ", round(accuracy_b, 4), "\n")
 cat("Sensitivity:", round(sensitivity_b, 4), "\n")
 cat("Specificity:", round(specificity_b, 4), "\n")
@@ -270,7 +297,7 @@ cat("=== AUC (Outcome B) ===\n")
 cat("AUC:", as.numeric(auc_b), "\n\n")
 
 # =============================================================================
-# --- 5. Comparison Table ------------------------------------------------------
+# --- 6. Comparison Table ------------------------------------------------------
 # =============================================================================
 
 cat("###################################################################\n")
@@ -293,10 +320,10 @@ print(comparison, digits = 4, row.names = FALSE)
 cat("\n")
 
 # =============================================================================
-# --- 6. Visualizations --------------------------------------------------------
+# --- 7. Visualizations --------------------------------------------------------
 # =============================================================================
 
-# --- 6a. Odds Ratio Forest Plot (Outcome A) ----------------------------------
+# --- 7a. Odds Ratio Forest Plot (Outcome A) ----------------------------------
 # This plot shows the odds ratio and 95% CI for each predictor.
 # The dashed line at OR=1 means "no effect"; points to the right indicate
 # increased odds of cardiovascular complication.
@@ -329,7 +356,7 @@ ggsave("outcome_a_odds_ratios.png", plot = p_forest,
        width = 8, height = 6, dpi = 150)
 cat("Saved: outcome_a_odds_ratios.png\n")
 
-# --- 6b. Odds Ratio Forest Plot (Outcome B) ----------------------------------
+# --- 7b. Odds Ratio Forest Plot (Outcome B) ----------------------------------
 
 or_plot_data_b <- odds_table_b[-1, ]
 or_plot_data_b$Variable <- rownames(or_plot_data_b)
@@ -355,7 +382,7 @@ ggsave("outcome_b_odds_ratios.png", plot = p_forest_b,
        width = 8, height = 6, dpi = 150)
 cat("Saved: outcome_b_odds_ratios.png\n")
 
-# --- 6c. ROC Curves for Both Outcomes ----------------------------------------
+# --- 7c. ROC Curves for Both Outcomes ----------------------------------------
 
 # Build a combined data frame for ggplot
 roc_df_a <- data.frame(
