@@ -1,0 +1,429 @@
+---
+title: "Prediction of Cardiovascular and Healthcare Utilization Outcomes in Type 2 Diabetes"
+author: "Your Name"
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    code-fold: false
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+Due to substantial missing data in all the laboratory variables, I performed a complete-case analysis. I first conducted univariable analyses to explore associations between each predictor and the outcomes. I then fitted multivariable models, including a primary model with variables with less than 90% missing data and a secondary exploratory model including all laboratory variables (except from homocystein), recognizing the reduced sample size.
+
+## 1. Load packages
+
+```{r}
+library(tidyverse)
+library(naniar)
+library(gtsummary)
+library(broom)
+library(pROC)
+library(ResourceSelection)
+```
+
+## 2. Load data
+
+```{r}
+data1 <- read.csv("data1.csv", stringsAsFactors = FALSE)
+summary_data1 <- read.csv("summary_data1.csv", stringsAsFactors = FALSE)
+
+dim(data1)
+```
+
+## 3. Clean data
+
+```{r}
+data_clean <- data1 %>%
+  distinct() %>%
+  mutate(across(where(is.character), ~ na_if(.x, "censored")))
+```
+
+## 4. Define cohort
+
+Restriction of the dataset to the study population of interest:
+
+adults aged 18 years or older
+patients with a diagnosis of Type 2 diabetes mellitus
+diagnosis occurring during an emergency or inpatient encounter
+
+This defines the final analytic cohort.
+
+```{r}
+cohort <- data_clean %>%
+  filter(
+    r_age_at_event >= 18,
+    !is.na(r_condition),
+    str_detect(r_condition, regex("Type 2 diabetes mellitus", ignore_case = TRUE)),
+    r_encounter_types %in% c("emergency", "inpatient", "inpatient|emergency")
+  )
+
+nrow(cohort)
+```
+
+## 5. Create variables
+
+baseline predictors: age, sex, and laboratory values measured within 90 days after the event
+Outcome 1: stroke, heart failure, or chronic kidney failure within 10 years
+Outcome 2: emergency department visit within 1 year
+
+I also create factor versions of the outcomes for the descriptive tables.
+
+```{r}
+data <- cohort %>%
+  mutate(
+    age = r_age_at_event,
+    sex = factor(gender, levels = c("Female", "Male")),
+
+    hba1c = l_90dPost_hba1c_result_numeric_calculated,
+    cholesterol = l_90dPost_cholesterol_total_result_numeric_calculated,
+    glucose = l_90dPost_glucose_result_numeric_calculated,
+    homocysteine = l_90dPost_homocystine_result_numeric_calculated,
+    triglycerides = l_90dPost_triglycerides_result_numeric_calculated,
+    creatinine = l_90dPost_creatinine_result_numeric_calculated,
+
+    stroke_10y = if_else(
+      !is.na(c_20yPost_avc_like_date_time_of_condition_assigned_days_from_reference) &
+        c_20yPost_avc_like_date_time_of_condition_assigned_days_from_reference > 0 &
+        c_20yPost_avc_like_date_time_of_condition_assigned_days_from_reference <= 3652,
+      1, 0
+    ),
+
+    hf_10y = if_else(
+      !is.na(c_20yPost_congestive_heart_failure_date_time_of_condition_assigned_days_from_reference) &
+        c_20yPost_congestive_heart_failure_date_time_of_condition_assigned_days_from_reference > 0 &
+        c_20yPost_congestive_heart_failure_date_time_of_condition_assigned_days_from_reference <= 3652,
+      1, 0
+    ),
+
+    ckd_10y = if_else(
+      !is.na(c_20yPost_chonic_kidney_disease_date_time_of_condition_assigned_days_from_reference) &
+        c_20yPost_chonic_kidney_disease_date_time_of_condition_assigned_days_from_reference > 0 &
+        c_20yPost_chonic_kidney_disease_date_time_of_condition_assigned_days_from_reference <= 3652,
+      1, 0
+    ),
+
+    outcome1 = if_else(
+      stroke_10y == 1 | hf_10y == 1 | ckd_10y == 1,
+      1, 0
+    ),
+
+    outcome2 = if_else(
+      !is.na(e_30dPost_admission_start_date_days_from_reference) &
+        e_30dPost_admission_start_date_days_from_reference > 0 &
+        e_30dPost_admission_start_date_days_from_reference <= 365,
+      1, 0
+    ),
+
+    outcome1_f = factor(outcome1, levels = c(0, 1), labels = c("No", "Yes")),
+    outcome2_f = factor(outcome2, levels = c(0, 1), labels = c("No", "Yes"))
+  )
+```
+
+## 6. Descriptive statistics
+
+This gives a quick overview of the final cohort:
+
+total sample size
+mean age
+proportion of males
+frequency of Outcome 1 and Outcome 2
+```{r}
+data %>%
+  summarise(
+    N = n(),
+    age_mean = mean(age, na.rm = TRUE),
+    male_pct = mean(sex == "Male", na.rm = TRUE) * 100,
+    outcome1_pct = mean(outcome1, na.rm = TRUE) * 100,
+    outcome2_pct = mean(outcome2, na.rm = TRUE) * 100
+  )
+```
+
+## 7. Missing data
+
+ Before modeling, I examine missingness in the predictors.
+This is important because the regression models below use complete-case analysis, meaning that only patients with complete data for the variables in each model are included.
+
+```{r}
+data %>%
+  summarise(across(c(age, sex, hba1c, cholesterol, glucose,
+                     homocysteine, triglycerides, creatinine),
+                   ~ mean(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_prop")
+```
+
+## 8. Table 1 for Outcome 1
+
+This table compares baseline characteristics between patients with and without Outcome 1.
+
+```{r}
+data %>%
+  select(outcome1_f, age, sex, hba1c, cholesterol,
+         glucose, triglycerides, creatinine) %>%
+  tbl_summary(
+    by = outcome1_f,
+    statistic = list(
+      all_continuous() ~ "{median} ({p25}, {p75})"
+    )
+  ) %>%
+  add_p()
+```
+
+## 9. Table 1 for Outcome 2
+
+This table compares baseline characteristics between patients with and without Outcome 2.
+
+```{r}
+data %>%
+  select(outcome2_f, age, sex, hba1c, cholesterol,
+         glucose, triglycerides, creatinine) %>%
+  tbl_summary(
+    by = outcome2_f,
+    statistic = list(
+      all_continuous() ~ "{median} ({p25}, {p75})"
+    )
+  ) %>%
+  add_p()
+```
+
+## 10. Univariable logistic regression function
+
+I now define a function to run univariable logistic regression.
+This means that each predictor is tested one at a time against the outcome.
+
+The function:
+
+keeps only the outcome and one predictor
+removes rows with missing values
+fits a logistic regression model
+returns odds ratios, confidence intervals, and p-values
+
+```{r}
+vars <- c("age", "sex", "hba1c", "cholesterol",
+          "glucose", "homocysteine",
+          "triglycerides", "creatinine")
+
+run_uni <- function(outcome_var, predictor_var, data) {
+  d <- data %>%
+    select(all_of(outcome_var), all_of(predictor_var)) %>%
+    drop_na()
+
+  if (nrow(d) < 50) return(NULL)
+
+  fit <- glm(
+    as.formula(paste(outcome_var, "~", predictor_var)),
+    data = d,
+    family = binomial()
+  )
+
+  broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(
+      outcome = outcome_var,
+      variable = predictor_var,
+      n = nrow(d)
+    ) %>%
+    select(outcome, variable, n, estimate, conf.low, conf.high, p.value)
+}
+```
+
+## 11. Univariable logistic regression for Outcome 1
+
+Here I run separate univariable models for each predictor using Outcome 1.
+
+```{r}
+uni_outcome1 <- map_dfr(vars, ~ run_uni("outcome1", .x, data))
+
+uni_outcome1
+```
+
+
+## 12. Multivariable model for Outcome 1: primary model
+
+This is the main multivariable model for Outcome 1.
+It includes:
+
+age
+sex
+glucose
+creatinine
+
+These predictors are included because they are clinically relevant and have better data availability than some of the other laboratory variables.
+
+```{r}
+main_data_outcome1 <- data %>%
+  select(outcome1, age, sex, glucose, creatinine) %>%
+  drop_na()
+
+model_main_outcome1 <- glm(
+  outcome1 ~ age + sex + glucose + creatinine,
+  data = main_data_outcome1,
+  family = binomial()
+)
+
+broom::tidy(model_main_outcome1, exponentiate = TRUE, conf.int = TRUE)
+```
+
+## 13. Multivariable model for Outcome 1: full lab model
+This is a secondary, more exploratory model for Outcome 1 that additionally includes:
+
+HbA1c
+cholesterol
+triglycerides
+
+Because these variables have more missing data, this model is fit on a smaller complete-case subset.
+
+```{r}
+full_data_outcome1 <- data %>%
+  select(outcome1, age, sex, hba1c, cholesterol,
+         glucose, triglycerides, creatinine) %>%
+  drop_na()
+
+model_full_outcome1 <- glm(
+  outcome1 ~ age + sex + hba1c + cholesterol +
+    glucose + triglycerides + creatinine,
+  data = full_data_outcome1,
+  family = binomial()
+)
+
+broom::tidy(model_full_outcome1, exponentiate = TRUE, conf.int = TRUE)
+```
+
+## 14. Univariable logistic regression for Outcome 2
+
+Here I repeat the univariable analyses, but now using Outcome 2.
+```{r}
+uni_outcome2 <- map_dfr(vars, ~ run_uni("outcome2", .x, data))
+
+uni_outcome2
+```
+
+
+## 15. Multivariable model for Outcome 2: primary model
+
+This is the main multivariable model for Outcome 2, again using age, sex, glucose, and creatinine.
+
+```{r}
+main_data_outcome2 <- data %>%
+  select(outcome2, age, sex, glucose, creatinine) %>%
+  drop_na()
+
+model_main_outcome2 <- glm(
+  outcome2 ~ age + sex + glucose + creatinine,
+  data = main_data_outcome2,
+  family = binomial()
+)
+
+broom::tidy(model_main_outcome2, exponentiate = TRUE, conf.int = TRUE)
+```
+
+## 16. Multivariable model for Outcome 2: full lab model
+
+This is the more exploratory full laboratory model for Outcome 2.
+
+```{r}
+full_data_outcome2 <- data %>%
+  select(outcome2, age, sex, hba1c, cholesterol,
+         glucose, triglycerides, creatinine) %>%
+  drop_na()
+
+model_full_outcome2 <- glm(
+  outcome2 ~ age + sex + hba1c + cholesterol +
+    glucose + triglycerides + creatinine,
+  data = full_data_outcome2,
+  family = binomial()
+)
+
+broom::tidy(model_full_outcome2, exponentiate = TRUE, conf.int = TRUE)
+```
+
+
+
+Below I evaluate how well the models discriminate between patients with and without Outcome 1 and 2 using:
+
+ROC curves
+Area under the curve (AUC)
+
+## 17. Model performance for Outcome 1
+
+
+```{r}
+p_main_outcome1 <- predict(model_main_outcome1, type = "response")
+roc_main_outcome1 <- roc(main_data_outcome1$outcome1, p_main_outcome1)
+auc(roc_main_outcome1)
+plot(roc_main_outcome1)
+```
+
+```{r}
+p_full_outcome1 <- predict(model_full_outcome1, type = "response")
+roc_full_outcome1 <- roc(full_data_outcome1$outcome1, p_full_outcome1)
+auc(roc_full_outcome1)
+plot(roc_full_outcome1)
+```
+
+## 18. Model performance for Outcome 2
+
+```{r}
+p_main_outcome2 <- predict(model_main_outcome2, type = "response")
+roc_main_outcome2 <- roc(main_data_outcome2$outcome2, p_main_outcome2)
+auc(roc_main_outcome2)
+plot(roc_main_outcome2)
+```
+
+```{r}
+p_full_outcome2 <- predict(model_full_outcome2, type = "response")
+roc_full_outcome2 <- roc(full_data_outcome2$outcome2, p_full_outcome2)
+auc(roc_full_outcome2)
+plot(roc_full_outcome2)
+```
+
+## 19. Calibration
+
+Finally, I assess calibration of the primary models using the Hosmer-Lemeshow test.
+This checks how well predicted probabilities agree with observed outcomes.
+
+```{r}
+hoslem.test(main_data_outcome1$outcome1, fitted(model_main_outcome1), g = 10)
+```
+
+```{r}
+hoslem.test(main_data_outcome2$outcome2, fitted(model_main_outcome2), g = 10)
+```
+
+## 20. Optional: save results
+
+```{r}
+write.csv(uni_outcome1, "univariable_outcome1.csv", row.names = FALSE)
+write.csv(uni_outcome2, "univariable_outcome2.csv", row.names = FALSE)
+```
+
+```{r}
+write.csv(
+  broom::tidy(model_main_outcome1, exponentiate = TRUE, conf.int = TRUE),
+  "multivariable_main_outcome1.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  broom::tidy(model_full_outcome1, exponentiate = TRUE, conf.int = TRUE),
+  "multivariable_full_outcome1.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  broom::tidy(model_main_outcome2, exponentiate = TRUE, conf.int = TRUE),
+  "multivariable_main_outcome2.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  broom::tidy(model_full_outcome2, exponentiate = TRUE, conf.int = TRUE),
+  "multivariable_full_outcome2.csv",
+  row.names = FALSE
+)
+```
+
+
