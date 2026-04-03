@@ -31,7 +31,7 @@ if (!require("ggplot2", quietly = TRUE)) {
 # --- 1. Load and inspect data ------------------------------------------------
 
 # Path is relative to the script location (model/ directory)
-data_path <- file.path("..", "data", "cleaned_data.csv")
+data_path <- file.path("data", "cleaned_data.csv")
 df <- read.csv(data_path, stringsAsFactors = FALSE)
 
 cat("=== Dataset Dimensions ===\n")
